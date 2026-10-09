@@ -16,13 +16,20 @@ liga o buzzer por 3 segundos.
   entre a central e as portas não importa, só o sinal de cada uma até o roteador.
 - Todos os ESPs pegam **IP automático** do roteador (DHCP). Nada de IP fixo.
 - Quando a NodeMCU conecta no Wi-Fi, ela pergunta para a rede toda onde está a
-  central (mensagem `CAMPAINHA?` em broadcast UDP, porta 4210). A central responde
-  e a NodeMCU guarda o IP dela.
+  central (mensagem `CAMPAINHA?` em broadcast UDP para 255.255.255.255, porta 4210).
+  A central responde e a NodeMCU guarda o IP dela. Ela confere de novo a cada 5 min.
 - Quando um botão é apertado, a NodeMCU acessa
   `http://IP_DA_CENTRAL/tocar?origem=porta1-entrada` (ou `porta2-saida` etc.).
   A central responde "ok" e liga o buzzer pelo tempo configurado (3 s de fábrica).
-- Se a central não responder no IP guardado (por exemplo, o roteador deu outro IP
+- Se a central não responder "ok" no IP guardado (por exemplo, o roteador deu outro IP
   para ela), a NodeMCU procura de novo e tenta outra vez, por até 20 s.
+- **Faixas de IP diferentes:** se a porta e a central acabarem em faixas diferentes
+  (por exemplo, dois aparelhos entregando IP na mesma rede), o HTTP não chega. Nesse
+  caso a porta manda o aviso em broadcast (`TOCAR <id> <origem>`), que chega a todos
+  no mesmo Wi-Fi seja qual for a faixa, e a central confirma em broadcast
+  (`TOCADO <id>`). A campainha continua funcionando, e as páginas avisam do problema.
+- Se a porta ficar 10 min sem nenhuma resposta da central, ela reconecta o Wi-Fi
+  para pedir IP de novo.
 - Apertos durante o toque são ignorados: o buzzer desliga no tempo certo e o
   próximo aperto depois disso toca na hora.
 - A origem do aviso não muda o toque. Ela só aparece na página de status da central.
@@ -140,6 +147,9 @@ diagnóstico. Tudo isso funciona de longe, pela rede.
 - **Último aviso à central:** se deu certo ou o erro (por exemplo, central não encontrada).
 - **Simular entrada / Simular saída:** faz o mesmo caminho de um aperto de verdade e
   mostra se a central respondeu. Na central, o aviso aparece como `porta1-entrada-simulado`.
+- **Rede:** IP, gateway e máscara da porta, IP da central e quando ela respondeu pela
+  última vez. Se a central estiver em outra faixa de IP, aparece em destaque, assim
+  como as reconexões feitas por falta de resposta da central.
 
 **Nas duas páginas:**
 - **Situação:** há quanto tempo está ligada, o motivo do último reinício (queda de
@@ -257,6 +267,11 @@ diferente da do módulo.
 - **NodeMCU mostra "Central não respondeu à procura":** a central está desligada,
   em outra rede, ou o roteador está bloqueando a comunicação entre aparelhos
   (opção "isolamento de clientes"/"AP isolation", que precisa ficar desligada).
+- **Página mostra uma placa "em outra faixa de IP":** tem mais de um aparelho entregando
+  IP na rede (por exemplo, o D-Link com o DHCP ligado, distribuindo 192.168.0.x). A
+  campainha continua funcionando por broadcast, mas corrija a rede: deixe só o roteador
+  principal entregando IP e reinicie a placa pela página. Enquanto isso, a troca de
+  Wi-Fi pela central não chega nas portas que estão em outra faixa.
 - **Porta "não confirmou" o Wi-Fi novo:** confira se o `SENHA_ADMIN` dela é igual ao
   da central. Ela continua no Wi-Fi antigo; quando ele for desligado, use a rede de
   socorro dela.
