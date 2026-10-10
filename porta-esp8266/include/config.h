@@ -3,10 +3,11 @@
 // ===== Wi-Fi (valores de fábrica) =====
 // Tem que ser o mesmo Wi-Fi da central. O IP da central não precisa ser configurado:
 // a NodeMCU pergunta na rede onde ela está.
-// Depois de gravado, o Wi-Fi pode ser trocado sem cabo: pela página da central (que
-// envia o Wi-Fi novo para as portas) ou pela rede de socorro da porta. O que for salvo
-// assim fica na flash e vale mais que os valores daqui. Se você mudar os valores daqui
-// e gravar o firmware de novo, eles voltam a valer.
+// De fábrica a porta usa IP automático (DHCP). Depois de gravado, o Wi-Fi e o IP (automático
+// ou fixo) podem ser trocados sem cabo: pela página da porta, pela página da central (que
+// envia só o Wi-Fi novo para as portas) ou pela rede de socorro da porta. O que for salvo
+// assim fica na flash e vale mais que os valores daqui. Se você mudar o Wi-Fi daqui e gravar
+// o firmware de novo, ele volta a valer (com IP automático).
 #define WIFI_SSID  "EspCampainha"
 #define WIFI_SENHA "Wires01#"
 

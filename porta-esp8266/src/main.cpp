@@ -13,8 +13,9 @@
 // 5 min e sempre que a central não responde "ok" no IP guardado (o IP mudou).
 //
 // Se a porta e a central acabarem em faixas de IP diferentes (dois aparelhos entregando IP
-// na mesma rede, por exemplo), o HTTP não chega. Nesse caso o aviso vai em broadcast:
-// "TOCAR <id> <origem>", e a central confirma com "TOCADO <id>", também em broadcast.
+// na mesma rede, por exemplo), ou se o HTTP falhar mesmo com a central respondendo à procura
+// (máscaras diferentes nas placas, por exemplo), o aviso vai em broadcast:
+// "TOCAR <id> <origem>", e a central confirma com "TOCADO <id>".
 //
 // O Wi-Fi e o modo de IP (automático ou fixo, com gateway e máscara) ficam guardados na
 // flash (EEPROM) e podem ser trocados sem cabo:
@@ -97,6 +98,9 @@ ESP8266WebServer servidor(80);
 WiFiUDP udp;
 IPAddress ipCentral;
 bool centralConhecida = false;
+// A central responde, mas o HTTP não chega até ela (máscaras diferentes nas placas, por
+// exemplo): os avisos passam a ir direto por broadcast, sem esperar o HTTP falhar a cada aperto.
+bool httpNaoChega = false;
 unsigned long ultimaProcura = 0;
 unsigned long centralRespondeuEm = 0;  // última vez que a central respondeu (procura ou aviso)
 unsigned long reconexoes = 0;          // reconexões por falta de resposta da central
@@ -273,15 +277,25 @@ void responderCentral() {
   tratarPacoteUdp(msg);
 }
 
+// Trata os pacotes que já estavam esperando, antes de uma procura ou aviso: respostas
+// antigas são ignoradas, e uma pergunta da central ainda é respondida.
+void tratarPacotesPendentes() {
+  while (udp.parsePacket() > 0) {
+    char msg[64];
+    lerPacote(msg, sizeof(msg));
+    tratarPacoteUdp(msg);
+  }
+}
+
 // ===== Central =====
 
 // Pergunta na rede (broadcast) onde está a central e guarda o IP de quem responder.
 bool procurarCentral() {
   ultimaProcura = millis();
-  while (udp.parsePacket() > 0) {}  // descarta respostas antigas
+  tratarPacotesPendentes();
 
   for (int tentativa = 0; tentativa < 3; tentativa++) {
-    // Pelo broadcast da própria faixa (caminho certo mesmo com a rede de socorro ligada) e
+    // Pelo broadcast da própria faixa (funciona até se o roteador não informar gateway) e
     // pelo geral (alcança a central se ela estiver em outra faixa de IP).
     for (IPAddress destino : {WiFi.broadcastIP(), BROADCAST_GERAL}) {
       udp.beginPacket(destino, PORTA_DESCOBERTA);
@@ -299,6 +313,7 @@ bool procurarCentral() {
           if (!centralConhecida || ip != ipCentral) {
             Serial.printf("Central encontrada em %s%s\n", ip.toString().c_str(),
                           naMinhaFaixa(ip) ? "" : " (outra faixa de IP: avisos vão por broadcast)");
+            if (ip != ipCentral) httpNaoChega = false;  // central em outro IP: tenta o HTTP de novo
           }
           ipCentral = ip;
           centralConhecida = true;
@@ -351,12 +366,13 @@ bool avisarPorHttp(const String& origemCompleta) {
   return false;
 }
 
-// Central em outra faixa de IP: o HTTP não chegaria nela, mas o broadcast chega.
+// Quando o HTTP não chega à central (outra faixa de IP, máscaras diferentes...): o broadcast
+// chega a todos no mesmo Wi-Fi, e a central confirma.
 bool avisarPorBroadcast(const String& origemCompleta) {
   uint32_t id = ESP.random();
   String pedido = PEDIDO_TOQUE + String(id) + " " + origemCompleta;
   String confirmacao = CONFIRMACAO_TOQUE + String(id);
-  while (udp.parsePacket() > 0) {}  // descarta pacotes antigos
+  tratarPacotesPendentes();
 
   for (int tentativa = 0; tentativa < 3; tentativa++) {
     udp.beginPacket(BROADCAST_GERAL, PORTA_DESCOBERTA);
@@ -369,8 +385,10 @@ bool avisarPorBroadcast(const String& origemCompleta) {
         char msg[64];
         lerPacote(msg, sizeof(msg));
         if (confirmacao == msg) {
-          registrarEnvio(true, origemCompleta + " entregue à central " + ipCentral.toString() +
-                                   " por broadcast (ela está em outra faixa de IP)");
+          registrarEnvio(true, origemCompleta + " entregue à central " + ipCentral.toString() + " por broadcast" +
+                                   (naMinhaFaixa(ipCentral)
+                                        ? F(" (o HTTP não chega até ela: confira IP e máscara das placas)")
+                                        : F(" (ela está em outra faixa de IP)")));
           return true;
         }
         tratarPacoteUdp(msg);
@@ -378,9 +396,8 @@ bool avisarPorBroadcast(const String& origemCompleta) {
       delay(5);
     }
   }
-  Serial.printf("Central em outra faixa (%s) não confirmou o aviso por broadcast\n", ipCentral.toString().c_str());
-  registrarEnvio(false, origemCompleta + ": a central " + ipCentral.toString() +
-                            " (outra faixa de IP) não confirmou o aviso por broadcast");
+  Serial.printf("Central (%s) não confirmou o aviso por broadcast\n", ipCentral.toString().c_str());
+  registrarEnvio(false, origemCompleta + ": a central " + ipCentral.toString() + " não confirmou o aviso por broadcast");
   return false;
 }
 
@@ -391,7 +408,18 @@ bool avisarCentral(const char* origem) {
     return false;
   }
 
-  bool ok = naMinhaFaixa(ipCentral) ? avisarPorHttp(origemCompleta) : avisarPorBroadcast(origemCompleta);
+  bool mesmaFaixa = naMinhaFaixa(ipCentral);
+  bool tentouHttp = mesmaFaixa && !httpNaoChega;
+  bool ok = tentouHttp && avisarPorHttp(origemCompleta);
+  if (!ok) {
+    String erroHttp = tentouHttp ? ultimoEnvioTexto : String();
+    ok = avisarPorBroadcast(origemCompleta);
+    // Respondeu por broadcast mas não por HTTP, estando "na mesma faixa": as máscaras das placas
+    // não batem (ou algo no caminho bloqueia). Usa só broadcast até a central mudar de IP.
+    if (ok && mesmaFaixa) httpNaoChega = true;
+    if (!ok && tentouHttp) registrarEnvio(false, erroHttp + "; por broadcast também não confirmou");
+  }
+
   if (ok) {
     centralRespondeuEm = millis();
   } else {
@@ -422,6 +450,7 @@ void gerenciarWifi(unsigned long agora) {
                   WiFi.localIP().toString().c_str(), WiFi.gatewayIP().toString().c_str(), WiFi.RSSI());
     // Já procura a central agora, para o primeiro aperto não ter que esperar a procura.
     centralConhecida = false;
+    httpNaoChega = false;
     procurarCentral();
   }
 
@@ -610,6 +639,9 @@ void enviarPagina(const String& aviso = String(), int codigo = 200) {
     if (conectado && !naMinhaFaixa(ipCentral)) {
       p += F(" <b>(em outra faixa de IP: os avisos vão por broadcast. "
              "Tem mais de um aparelho entregando IP na rede?)</b>");
+    } else if (httpNaoChega) {
+      p += F(" <b>(o HTTP não chega até ela, os avisos vão por broadcast. "
+             "Confira IP e máscara das placas)</b>");
     }
   } else {
     p += F("<br>Central: <b>não encontrada</b>");
@@ -883,17 +915,17 @@ void loop() {
       avisoPendente = false;
       piscarErro();
     }
+  } else if (estavaConectado && millis() - ultimaProcura > INTERVALO_PROCURA_MS) {
+    procurarCentral();  // confere se a central continua no mesmo IP
   } else if (estavaConectado && millis() - centralRespondeuEm > RECONECTAR_SEM_CENTRAL_MS) {
-    // Muito tempo sem resposta da central, nem pela procura em broadcast: reconecta para
-    // pedir IP de novo ao roteador. Espera mais 10 min antes de tentar de novo.
+    // Muito tempo sem resposta da central, nem pela procura que acabou de falhar: reconecta
+    // para pedir IP de novo ao roteador. Espera mais 10 min antes de tentar de novo.
     Serial.println("10 min sem resposta da central: reconectando o Wi-Fi para pedir IP de novo");
     reconexoes++;
     ultimaReconexao = millis();
     centralRespondeuEm = millis();
     WiFi.disconnect();
     conectarNaRede();
-  } else if (estavaConectado && millis() - ultimaProcura > INTERVALO_PROCURA_MS) {
-    procurarCentral();  // confere se a central continua no mesmo IP
   }
 
   // Espera um pouco antes de reiniciar para a resposta chegar a quem pediu.

@@ -6,7 +6,9 @@
 //
 // Por padrão a central pega IP automático (DHCP). As NodeMCU a encontram mandando
 // "CAMPAINHA?" em broadcast UDP; a central responde "CAMPAINHA!" e elas usam o IP de
-// quem respondeu. Para as pessoas, a central se anuncia como http://NOME_NA_REDE.local (mDNS).
+// quem respondeu. Quando o HTTP não chega (porta em outra faixa de IP, máscaras diferentes),
+// a porta avisa em broadcast com "TOCAR <id> <origem>" e a central confirma com "TOCADO <id>".
+// Para as pessoas, a central se anuncia como http://NOME_NA_REDE.local (mDNS).
 //
 // O tempo do toque, o Wi-Fi e o modo de IP ficam guardados na flash (EEPROM).
 //
@@ -342,10 +344,15 @@ struct Porta {
 // Pergunta na rede quais portas estão conectadas. Retorna quantas responderam.
 uint8_t buscarPortas(Porta* portas, uint8_t maximo) {
   uint8_t qtd = 0;
-  while (udpDescoberta.parsePacket() > 0) {}  // descarta pacotes antigos
+  // Pacotes que já estavam esperando: uma procura ou um aviso de porta ainda são atendidos.
+  while (udpDescoberta.parsePacket() > 0) {
+    char msg[64];
+    lerPacote(msg, sizeof(msg));
+    tratarPacoteUdp(msg);
+  }
 
   for (int tentativa = 0; tentativa < 3; tentativa++) {
-    // Pelo broadcast da própria faixa (caminho certo mesmo com a rede de socorro ligada) e
+    // Pelo broadcast da própria faixa (funciona até se o roteador não informar gateway) e
     // pelo geral (alcança portas que estejam em outra faixa de IP).
     for (IPAddress destino : {WiFi.broadcastIP(), BROADCAST_GERAL}) {
       udpDescoberta.beginPacket(destino, PORTA_DESCOBERTA);
@@ -699,7 +706,7 @@ void tratarSalvarRede() {
   if (!dhcp) {
     if (!ip.fromString(servidor.arg("ip")) || !gateway.fromString(servidor.arg("gateway")) ||
         !mascara.fromString(servidor.arg("mascara"))) {
-      enviarPagina(F("IP, gateway ou máscara em formato errado (ex: 192.168.0.250)."));
+      enviarPagina(F("IP, gateway ou máscara em formato errado (ex: 192.168.16.250). Nada foi salvo."));
       return;
     }
     if (!mascaraValida(mascara)) {
@@ -708,7 +715,7 @@ void tratarSalvarRede() {
     }
     if (!redeValida(ip, gateway, mascara)) {
       enviarPagina(F("O IP da central tem que estar na mesma faixa do roteador e ser diferente dele "
-                     "(ex: roteador 192.168.0.1, central 192.168.0.250). Nada foi salvo."));
+                     "(ex: roteador 192.168.16.1, central 192.168.16.250). Nada foi salvo."));
       return;
     }
   }

@@ -92,7 +92,7 @@ No PlatformIO: **central > Upload**. Se o seu ESP-01 for o antigo de 512 KB
 ### 3. Testar a central pelo navegador
 
 Com o celular ou o PC na mesma rede, abra **`http://campainha-central.local`**.
-Usuário `admin`, senha `SENHA_ADMIN` do config.h (padrão: `campainha`).
+Usuário `admin`, senha `SENHA_ADMIN` do config.h.
 
 O nome `.local` funciona no Windows, iPhone e Mac. Se não abrir (alguns Android),
 procure `campainha-central` na lista de clientes DHCP do roteador principal e abra
@@ -249,9 +249,8 @@ cada porta com o celular.
 
 ## Antes de instalar
 
-- Troque a senha padrão `campainha` do `SENHA_ADMIN` nos dois `config.h`. Ela tem que
-  ser **igual** na central e nas portas e ter de 8 a 63 caracteres (o código não
-  compila fora disso).
+- O `SENHA_ADMIN` tem que ser **igual** nos dois `config.h` (central e portas) e ter
+  de 8 a 63 caracteres (o código não compila fora disso).
 - Grave cada NodeMCU com o ambiente da sua porta (`porta1`, `porta2`). Duas placas
   com o mesmo número usam o mesmo nome na rede e se confundem na página da central.
 - As redes de socorro usam a faixa `192.168.4.x`. Se a rede do roteador principal
@@ -302,6 +301,10 @@ diferente da do módulo.
   campainha continua funcionando por broadcast, mas corrija a rede: deixe só o roteador
   principal entregando IP e reinicie a placa pela página. Enquanto isso, a troca de
   Wi-Fi pela central não chega nas portas que estão em outra faixa.
+- **Página da porta diz que "o HTTP não chega" até a central:** a central responde à
+  procura, mas não ao HTTP. Quase sempre são máscaras diferentes nas placas com IP fixo
+  (uma enxerga a outra, mas não o contrário). A campainha continua tocando por
+  broadcast; acerte IP e máscara para as duas ficarem na mesma faixa.
 - **Porta "não confirmou" o Wi-Fi novo:** confira se o `SENHA_ADMIN` dela é igual ao
   da central. Ela continua no Wi-Fi antigo; quando ele for desligado, use a rede de
   socorro dela.
