@@ -14,7 +14,8 @@ liga o buzzer por 3 segundos.
 
 - Os ESPs nunca falam diretamente entre si: tudo passa pelo roteador. A distância
   entre a central e as portas não importa, só o sinal de cada uma até o roteador.
-- Todos os ESPs pegam **IP automático** do roteador (DHCP). Nada de IP fixo.
+- De fábrica, todos os ESPs pegam **IP automático** do roteador (DHCP). Pela página de
+  cada um dá para fixar IP, gateway e máscara (veja [IP fixo](#ip-fixo)).
 - Quando a NodeMCU conecta no Wi-Fi, ela pergunta para a rede toda onde está a
   central (mensagem `CAMPAINHA?` em broadcast UDP para 255.255.255.255, porta 4210).
   A central responde e a NodeMCU guarda o IP dela. Ela confere de novo a cada 5 min.
@@ -114,7 +115,7 @@ mostra `Central encontrada em ...` quando acha a central.
 
 Cada NodeMCU também tem uma página (`http://campainha-porta1.local`, usuário
 `admin`, senha `SENHA_ADMIN`) que mostra o Wi-Fi, o IP e se ela achou a central,
-e permite trocar o Wi-Fi dela.
+e permite trocar o Wi-Fi e o modo de IP dela (automático ou fixo).
 
 ## Página de configuração da central
 
@@ -134,6 +135,34 @@ Em `http://campainha-central.local` (usuário `admin`, senha `SENHA_ADMIN`) dá 
 O que é salvo pelas páginas fica guardado na flash e continua valendo depois de
 desligar. Se você mudar algum valor de fábrica no `config.h` e gravar o firmware
 de novo, os valores do `config.h` voltam a valer.
+
+## IP fixo
+
+A central e cada porta podem usar IP automático (padrão) ou fixo. Na seção **Rede** da
+página de cada placa, desmarque "IP automático" e preencha IP, gateway e máscara. Os
+campos já vêm com o IP que a placa está usando, então basta conferir e salvar.
+
+Com IP fixo, a placa não pede IP a ninguém. É a forma mais segura quando a rede tem
+**mais de um aparelho entregando IP** (o caso da porta 1 no cliente, que pegou
+192.168.0.x de outro servidor DHCP enquanto o resto estava em 192.168.16.x):
+
+- Fixe as 3 placas na faixa do roteador principal (ex: `192.168.16.x`), com o
+  gateway e a máscara dele, usando IPs **fora da faixa do DHCP** do roteador (ou
+  reservados nele), para nenhum outro aparelho receber o mesmo IP.
+- Cuidado com a máscara: para duas placas conversarem direto, as **duas** precisam
+  se enxergar na mesma faixa. Se uma usar `255.255.255.0` e a outra `255.255.0.0`,
+  só uma delas vê a outra como vizinha.
+- A página não aceita máscara inválida nem IP fora da faixa do gateway.
+- A troca de Wi-Fi feita pela central não mexe no IP fixo das portas. Se o roteador
+  novo usar outra faixa, ajuste o IP de cada placa.
+
+Mesmo com faixas diferentes (por engano de configuração ou por um DHCP errado), a
+campainha continua tocando pelo broadcast, como explicado em "Como funciona". As
+páginas mostram o problema em destaque.
+
+Se um IP fixo errado deixar a placa inacessível, use a rede de socorro dela
+(abaixo): desligue e ligue a placa e, nos 3 primeiros minutos, conecte o celular na
+rede `Campainha-...` dela.
 
 ## Manutenção remota
 
@@ -191,8 +220,9 @@ socorro de cada aparelho (abaixo), indo até ele com o celular.
 
 ### Redes de socorro
 
-Cada aparelho que fica **mais de 30 s sem conseguir entrar no Wi-Fi** abre a própria
-rede, com a senha `SENHA_ADMIN`:
+Cada aparelho abre a própria rede, com a senha `SENHA_ADMIN`, nos **3 primeiros
+minutos depois de ligar** e sempre que fica **mais de 30 s sem conseguir entrar no
+Wi-Fi**:
 
 | Aparelho | Rede de socorro | Página |
 |---|---|---|
@@ -201,7 +231,7 @@ rede, com a senha `SENHA_ADMIN`:
 | Porta 2 | `Campainha-Porta2` | `http://192.168.4.1` |
 
 Conecte o celular nessa rede, abra a página, entre com `admin` / `SENHA_ADMIN` e
-coloque o Wi-Fi certo. O aparelho reinicia e entra na rede.
+corrija o Wi-Fi ou o IP. O aparelho reinicia e entra na rede.
 
 Com a rede de socorro aberta, o aparelho **continua procurando o roteador**: se o
 roteador só caiu e voltou, ele reconecta sozinho e a rede de socorro fecha. A busca
@@ -210,9 +240,9 @@ do último acesso), para a página não ficar instável. Um celular que só fico
 na rede de socorro, sem abrir a página, não atrapalha a reconexão. Como garantia extra,
 depois de 10 min sem Wi-Fi o aparelho reinicia e tenta de novo.
 
-A central também abre a rede de socorro nos **3 primeiros minutos** depois de ligar.
-Se perder o acesso a ela por qualquer motivo (um IP fixo errado, por exemplo),
-desligue e ligue a central de novo.
+Os 3 primeiros minutos servem para quando a placa entra no Wi-Fi mas fica
+inacessível (um IP fixo errado, por exemplo): desligue e ligue a placa e use a rede
+de socorro dela.
 
 A rede de socorro só alcança alguns metros a partir do aparelho: é preciso ir até
 cada porta com o celular.

@@ -16,11 +16,15 @@
 // na mesma rede, por exemplo), o HTTP não chega. Nesse caso o aviso vai em broadcast:
 // "TOCAR <id> <origem>", e a central confirma com "TOCADO <id>", também em broadcast.
 //
-// O Wi-Fi fica guardado na flash (EEPROM) e pode ser trocado sem cabo:
-//   - pela central: ela pergunta "CAMPAINHA-PORTAS?" na rede, a porta responde "PORTA N"
-//     e a central manda o Wi-Fi novo em POST /salvar-wifi (usuário "admin", senha SENHA_ADMIN);
+// O Wi-Fi e o modo de IP (automático ou fixo, com gateway e máscara) ficam guardados na
+// flash (EEPROM) e podem ser trocados sem cabo:
+//   - pela página da porta (Rede);
+//   - pela central, só o Wi-Fi: ela pergunta "CAMPAINHA-PORTAS?" na rede, a porta responde
+//     "PORTA N" e a central manda o Wi-Fi novo em POST /salvar-wifi (usuário "admin", senha
+//     SENHA_ADMIN);
 //   - pela rede de socorro "Campainha-PortaN" (senha SENHA_ADMIN, página em http://192.168.4.1),
-//     que abre quando a porta fica mais de 30 s sem Wi-Fi.
+//     que fica ligada nos 3 primeiros minutos depois de ligar a porta e sempre que ela ficar
+//     mais de 30 s sem Wi-Fi. Serve para corrigir um Wi-Fi ou IP fixo errado.
 //
 // A página (http://campainha-portaN.local) também mostra o estado dos botões, simula
 // apertos, reinicia a placa e atualiza o firmware.
@@ -53,7 +57,8 @@ static_assert(sizeof(SENHA_ADMIN) - 1 >= 8 && sizeof(SENHA_ADMIN) - 1 <= 63,
 // desta placa, para não gravar por engano o firmware da outra porta ou da central.
 const char MARCA_FIRMWARE[] = "<CAMPAINHA-FW:PORTA" TEXTO_MACRO(NUMERO_PORTA) ">";
 
-const unsigned long AP_SEM_WIFI_MS = 30000;              // abre a rede de socorro se ficar este tempo sem Wi-Fi
+const unsigned long AP_DEPOIS_DE_LIGAR_MS = 180000;      // rede de socorro aberta nos 3 primeiros minutos
+const unsigned long AP_SEM_WIFI_MS = 30000;              // e quando ficar este tempo sem Wi-Fi
 const unsigned long REINICIAR_SEM_WIFI_MS = 600000;      // reinicia se ficar 10 min sem Wi-Fi (e ninguém configurando)
 const unsigned long USO_PAGINA_MS = 180000;              // abriu a página há menos que isso = está configurando
 const unsigned long INTERVALO_PROCURA_MS = 300000;       // confere a cada 5 min se a central continua no mesmo IP
@@ -76,9 +81,13 @@ struct Config {
   uint32_t idFabrica;  // identifica os valores de fábrica do config.h que estavam valendo
   char ssid[33];
   char senha[65];
+  // Campos acrescentados na versão com IP fixo (a anterior só tinha os de cima).
+  uint8_t dhcp;        // 1 = IP automático, 0 = usa o IP fixo abaixo
+  uint32_t ip, gateway, mascara;
 };
 
-const uint32_t ASSINATURA = 0xCA3B0001;
+const uint32_t ASSINATURA = 0xCA3B0002;
+const uint32_t ASSINATURA_SO_WIFI = 0xCA3B0001;  // configuração salva pela versão anterior
 
 Config cfg;
 char nome[24];    // "campainha-portaN": nome na rede (http://campainha-portaN.local)
@@ -126,6 +135,7 @@ String ultimoEnvioTexto;
 bool estavaConectado = false;
 unsigned long semWifiDesde = 0;
 bool apLigado = false;
+bool janelaInicialAcabou = false;
 bool buscaPausada = false;
 bool acessouPagina = false;
 unsigned long ultimoAcessoPagina = 0;
@@ -144,27 +154,54 @@ uint32_t idDaFabrica() {
   return h;
 }
 
+// Máscara válida tem todos os bits 1 seguidos e depois só 0 (ex: 255.255.255.0).
+bool mascaraValida(uint32_t mascara) {
+  uint32_t zeros = ~__builtin_bswap32(mascara);  // IPAddress guarda os bytes na ordem da rede
+  return mascara != 0 && (zeros & (zeros + 1)) == 0;
+}
+
+// O IP tem que estar na mesma faixa do gateway, senão a porta fica fora da rede.
+bool redeValida(uint32_t ip, uint32_t gateway, uint32_t mascara) {
+  return mascaraValida(mascara) && ip != gateway &&
+         (ip & mascara) == (gateway & mascara) &&
+         (ip & ~mascara) != 0 && (ip | mascara) != 0xFFFFFFFF;  // nem endereço da rede, nem broadcast
+}
+
+// De fábrica a porta usa IP automático; o IP fixo só existe se for configurado pela página.
 void carregarFabrica() {
   memset(&cfg, 0, sizeof(cfg));
   cfg.assinatura = ASSINATURA;
   cfg.idFabrica = idDaFabrica();
   strlcpy(cfg.ssid, WIFI_SSID, sizeof(cfg.ssid));
   strlcpy(cfg.senha, WIFI_SENHA, sizeof(cfg.senha));
+  cfg.dhcp = 1;
+}
+
+void salvarConfig() {
+  EEPROM.put(0, cfg);
+  EEPROM.commit();
 }
 
 void carregarConfig() {
   EEPROM.get(0, cfg);
   cfg.ssid[sizeof(cfg.ssid) - 1] = 0;
   cfg.senha[sizeof(cfg.senha) - 1] = 0;
-  if (cfg.assinatura != ASSINATURA || cfg.idFabrica != idDaFabrica() || !cfg.ssid[0]) {
-    Serial.println("Usando o Wi-Fi de fábrica do config.h");
+
+  // Configuração da versão anterior: mantém o Wi-Fi (pode ter vindo da central) e usa IP automático.
+  if (cfg.assinatura == ASSINATURA_SO_WIFI && cfg.idFabrica == idDaFabrica() && cfg.ssid[0]) {
+    cfg.assinatura = ASSINATURA;
+    cfg.dhcp = 1;
+    cfg.ip = cfg.gateway = cfg.mascara = 0;
+    salvarConfig();
+    return;
+  }
+
+  bool valida = cfg.assinatura == ASSINATURA && cfg.idFabrica == idDaFabrica() && cfg.ssid[0] &&
+                cfg.dhcp <= 1 && (cfg.dhcp || redeValida(cfg.ip, cfg.gateway, cfg.mascara));
+  if (!valida) {
+    Serial.println("Usando o Wi-Fi de fábrica do config.h, com IP automático");
     carregarFabrica();
   }
-}
-
-void salvarConfig() {
-  EEPROM.put(0, cfg);
-  EEPROM.commit();
 }
 
 // ===== LED e botões =====
@@ -244,9 +281,13 @@ bool procurarCentral() {
   while (udp.parsePacket() > 0) {}  // descarta respostas antigas
 
   for (int tentativa = 0; tentativa < 3; tentativa++) {
-    udp.beginPacket(BROADCAST_GERAL, PORTA_DESCOBERTA);
-    udp.write(PERGUNTA_DESCOBERTA);
-    udp.endPacket();
+    // Pelo broadcast da própria faixa (caminho certo mesmo com a rede de socorro ligada) e
+    // pelo geral (alcança a central se ela estiver em outra faixa de IP).
+    for (IPAddress destino : {WiFi.broadcastIP(), BROADCAST_GERAL}) {
+      udp.beginPacket(destino, PORTA_DESCOBERTA);
+      udp.write(PERGUNTA_DESCOBERTA);
+      udp.endPacket();
+    }
 
     unsigned long inicio = millis();
     while (millis() - inicio < 300) {
@@ -362,6 +403,11 @@ bool avisarCentral(const char* origem) {
 // ===== Wi-Fi =====
 
 void conectarNaRede() {
+  if (cfg.dhcp) {
+    WiFi.config(0U, 0U, 0U);  // tudo zero = pedir IP ao roteador (DHCP)
+  } else {
+    WiFi.config(IPAddress(cfg.ip), IPAddress(cfg.gateway), IPAddress(cfg.mascara));
+  }
   WiFi.begin(cfg.ssid, cfg.senha);
 }
 
@@ -385,6 +431,7 @@ void gerenciarWifi(unsigned long agora) {
     semWifiDesde = agora;
   }
   bool muitoTempoSemWifi = !conectado && agora - semWifiDesde > AP_SEM_WIFI_MS;
+  if (agora > AP_DEPOIS_DE_LIGAR_MS) janelaInicialAcabou = true;
 
   // Alguém está configurando: tem aparelho na rede de socorro e a página foi aberta há
   // pouco. Só estar conectado não conta: um celular que lembrou a rede de socorro e
@@ -392,8 +439,9 @@ void gerenciarWifi(unsigned long agora) {
   uint8_t clientesAP = apLigado ? WiFi.softAPgetStationNum() : 0;
   bool configurando = clientesAP > 0 && acessouPagina && millis() - ultimoAcessoPagina < USO_PAGINA_MS;
 
-  // Rede de socorro: não desliga enquanto alguém estiver configurando.
-  bool precisaAP = muitoTempoSemWifi || configurando;
+  // Rede de socorro: nos primeiros minutos (para corrigir um IP fixo errado, que conecta no
+  // Wi-Fi mas deixa a porta inacessível), sem Wi-Fi, e enquanto alguém estiver configurando.
+  bool precisaAP = !janelaInicialAcabou || muitoTempoSemWifi || configurando;
   if (precisaAP && !apLigado) {
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAP(nomeAP, SENHA_ADMIN);
@@ -535,6 +583,7 @@ const char ESTILO[] PROGMEM =
     "label{display:block;margin-top:8px}"
     "input{display:block;width:100%;box-sizing:border-box;padding:6px;font-size:1em}"
     "input[type=checkbox]{display:inline;width:auto}"
+    "input:disabled{color:#999}"
     "button{font-size:1em;padding:8px 16px;margin-top:12px;margin-right:8px}"
     ".aviso{background:#fff3cd;padding:8px;border-radius:6px}"
     "</style></head><body>";
@@ -551,8 +600,8 @@ void enviarPagina(const String& aviso = String(), int codigo = 200) {
   p += F("<fieldset><legend>Situação</legend><p>");
   if (conectado) {
     p += "Wi-Fi: " + escapar(cfg.ssid) + " (" + String(WiFi.RSSI()) + " dBm)";
-    p += "<br>IP: " + WiFi.localIP().toString() + "<br>Gateway: " + WiFi.gatewayIP().toString() +
-         " &middot; Máscara: " + WiFi.subnetMask().toString();
+    p += "<br>IP: " + WiFi.localIP().toString() + (cfg.dhcp ? " (automático)" : " (fixo)");
+    p += "<br>Gateway: " + WiFi.gatewayIP().toString() + " &middot; Máscara: " + WiFi.subnetMask().toString();
   } else {
     p += "Wi-Fi: sem conexão com \"" + escapar(cfg.ssid) + "\"";
   }
@@ -597,16 +646,36 @@ void enviarPagina(const String& aviso = String(), int codigo = 200) {
          "<button name='botao' value='entrada'>Simular entrada</button>"
          "<button name='botao' value='saida'>Simular saída</button></form></fieldset>");
 
-  p += F("<form method='post' action='/salvar-wifi'><fieldset><legend>Wi-Fi</legend>"
-         "<p class='aviso'>O normal é trocar o Wi-Fi pela página da central, que envia para "
-         "as portas. Use esta página se esta porta não recebeu.</p>"
+  // No modo automático, os campos de IP fixo já vêm com o IP atual, para facilitar
+  // se quiser fixar a porta no IP que ela está usando.
+  bool mostrarAtual = cfg.dhcp && conectado;
+  IPAddress ip = mostrarAtual ? WiFi.localIP() : IPAddress(cfg.ip);
+  IPAddress gateway = mostrarAtual ? WiFi.gatewayIP() : IPAddress(cfg.gateway);
+  IPAddress mascara = mostrarAtual ? WiFi.subnetMask() : IPAddress(cfg.mascara);
+
+  p += F("<form method='post' action='/salvar-rede' onsubmit=\"return confirm('Salvar e reiniciar a porta "
+         "com esta configuração de rede? Se ela estiver errada, corrija pela rede de socorro da porta, que "
+         "abre nos 3 primeiros minutos depois de ligar.')\"><fieldset><legend>Rede</legend>"
+         "<p class='aviso'>Para trocar o Wi-Fi de todas as placas, o normal é usar a página da central, "
+         "que envia para as portas. Aqui é só para esta porta.</p>"
          "<label>Nome do Wi-Fi<input name='ssid' maxlength='32' required value='");
   p += escapar(cfg.ssid);
   p += F("'></label><label>Senha do Wi-Fi<input type='password' name='senha' maxlength='63' "
          "placeholder='em branco = manter a atual'></label>"
          "<label><input type='checkbox' "
          "onchange=\"this.form.senha.type=this.checked?'text':'password'\"> mostrar senha</label>"
-         "<button>Salvar e reiniciar</button></fieldset></form>");
+         "<label><input type='checkbox' name='dhcp' id='dhcp' onchange='modoIp()'");
+  if (cfg.dhcp) p += F(" checked");
+  p += F("> IP automático (DHCP)</label><div id='fixo'>"
+         "<label>IP da porta<input name='ip' required value='");
+  if (uint32_t(ip)) p += ip.toString();
+  p += F("'></label><label>Gateway (IP do roteador)<input name='gateway' required value='");
+  if (uint32_t(gateway)) p += gateway.toString();
+  p += F("'></label><label>Máscara<input name='mascara' required value='");
+  if (uint32_t(mascara)) p += mascara.toString();
+  p += F("'></label></div><button>Salvar e reiniciar</button></fieldset></form>"
+         "<script>function modoIp(){var d=document.getElementById('dhcp').checked;"
+         "document.querySelectorAll('#fixo input').forEach(function(e){e.disabled=d})}modoIp()</script>");
 
   p += F("<fieldset><legend>Manutenção</legend>"
          "<form method='post' action='/atualizar' enctype='multipart/form-data' "
@@ -635,19 +704,24 @@ void tratarPagina() {
   enviarPagina();
 }
 
-// Usado pelo formulário desta página e pela central, quando ela envia o Wi-Fi novo.
-// Responde 200 só se salvou, para a central saber se a porta recebeu.
+// Confere nome e senha do Wi-Fi recebidos. Devolve a mensagem de erro, ou vazio se estiver tudo certo.
+String erroNoWifi(const String& ssid, const String& senha) {
+  if (ssid.length() == 0 || ssid.length() > 32) return F("Nome do Wi-Fi inválido (até 32 caracteres).");
+  if (senha.length() > 0 && (senha.length() < 8 || senha.length() > 63)) {
+    return F("A senha do Wi-Fi precisa ter de 8 a 63 caracteres.");
+  }
+  return String();
+}
+
+// Usado pela central, quando ela envia o Wi-Fi novo para as portas. Só troca o Wi-Fi;
+// o modo de IP continua o mesmo. Responde 200 só se salvou, para a central saber se a porta recebeu.
 void tratarSalvarWifi() {
   if (!autorizado()) return;
   String ssid = servidor.arg("ssid");
   String senha = servidor.arg("senha");
-
-  if (ssid.length() == 0 || ssid.length() > 32) {
-    enviarPagina(F("Nome do Wi-Fi inválido (até 32 caracteres)."), 400);
-    return;
-  }
-  if (senha.length() > 0 && (senha.length() < 8 || senha.length() > 63)) {
-    enviarPagina(F("A senha do Wi-Fi precisa ter de 8 a 63 caracteres."), 400);
+  String erro = erroNoWifi(ssid, senha);
+  if (erro.length()) {
+    enviarPagina(erro, 400);
     return;
   }
 
@@ -656,6 +730,53 @@ void tratarSalvarWifi() {
   salvarConfig();
   Serial.printf("Wi-Fi novo salvo: \"%s\". Reiniciando...\n", cfg.ssid);
   enviarMensagemEReiniciar("Wi-Fi salvo. A porta vai entrar na rede \"" + escapar(cfg.ssid) + "\".");
+}
+
+// Formulário "Rede" desta página: Wi-Fi e modo de IP.
+void tratarSalvarRede() {
+  if (!autorizado()) return;
+  String ssid = servidor.arg("ssid");
+  String senha = servidor.arg("senha");
+  bool dhcp = servidor.hasArg("dhcp");
+  IPAddress ip, gateway, mascara;
+
+  String erro = erroNoWifi(ssid, senha);
+  if (erro.length()) {
+    enviarPagina(erro, 400);
+    return;
+  }
+  // No modo automático os campos de IP fixo nem são enviados: fica o que já estava salvo.
+  if (!dhcp) {
+    if (!ip.fromString(servidor.arg("ip")) || !gateway.fromString(servidor.arg("gateway")) ||
+        !mascara.fromString(servidor.arg("mascara"))) {
+      enviarPagina(F("IP, gateway ou máscara em formato errado (ex: 192.168.16.50). Nada foi salvo."), 400);
+      return;
+    }
+    if (!mascaraValida(mascara)) {
+      enviarPagina(F("Máscara inválida (o normal é 255.255.255.0). Nada foi salvo."), 400);
+      return;
+    }
+    if (!redeValida(ip, gateway, mascara)) {
+      enviarPagina(F("O IP da porta tem que estar na mesma faixa do gateway e ser diferente dele "
+                     "(ex: gateway 192.168.16.1, porta 192.168.16.50). Nada foi salvo."), 400);
+      return;
+    }
+  }
+
+  strlcpy(cfg.ssid, ssid.c_str(), sizeof(cfg.ssid));
+  if (senha.length()) strlcpy(cfg.senha, senha.c_str(), sizeof(cfg.senha));
+  cfg.dhcp = dhcp ? 1 : 0;
+  if (!dhcp) {
+    cfg.ip = ip;
+    cfg.gateway = gateway;
+    cfg.mascara = mascara;
+  }
+  salvarConfig();
+  Serial.printf("Rede salva: \"%s\", IP %s. Reiniciando...\n", cfg.ssid, dhcp ? "automático" : ip.toString().c_str());
+
+  String mensagem = "Configuração salva. A porta vai entrar na rede \"" + escapar(cfg.ssid) + "\"";
+  mensagem += dhcp ? String(F(" com IP automático.")) : " com o IP fixo " + ip.toString() + ".";
+  enviarMensagemEReiniciar(mensagem);
 }
 
 // Faz o mesmo que um aperto de verdade, mas espera a resposta para mostrar o resultado.
@@ -716,6 +837,7 @@ void setup() {
 
   servidor.on("/", HTTP_GET, tratarPagina);
   servidor.on("/salvar-wifi", HTTP_POST, tratarSalvarWifi);
+  servidor.on("/salvar-rede", HTTP_POST, tratarSalvarRede);
   servidor.on("/simular", HTTP_POST, tratarSimular);
   servidor.on("/reiniciar", HTTP_POST, tratarReiniciar);
   servidor.on("/atualizar", HTTP_POST, tratarAtualizacao, receberFirmware);

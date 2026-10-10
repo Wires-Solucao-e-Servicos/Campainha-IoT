@@ -345,9 +345,13 @@ uint8_t buscarPortas(Porta* portas, uint8_t maximo) {
   while (udpDescoberta.parsePacket() > 0) {}  // descarta pacotes antigos
 
   for (int tentativa = 0; tentativa < 3; tentativa++) {
-    udpDescoberta.beginPacket(BROADCAST_GERAL, PORTA_DESCOBERTA);
-    udpDescoberta.write(PERGUNTA_PORTAS);
-    udpDescoberta.endPacket();
+    // Pelo broadcast da própria faixa (caminho certo mesmo com a rede de socorro ligada) e
+    // pelo geral (alcança portas que estejam em outra faixa de IP).
+    for (IPAddress destino : {WiFi.broadcastIP(), BROADCAST_GERAL}) {
+      udpDescoberta.beginPacket(destino, PORTA_DESCOBERTA);
+      udpDescoberta.write(PERGUNTA_PORTAS);
+      udpDescoberta.endPacket();
+    }
 
     unsigned long inicio = millis();
     while (millis() - inicio < 400) {
